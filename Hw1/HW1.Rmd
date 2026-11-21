@@ -1,0 +1,271 @@
+---
+title: 'Homework1: La distorsione dalla variabile omessa'
+author: "Maria Li, Tommaso Pastorelli"
+date: "2026-03-14"
+output: ioslides_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# Carichiamo la libreria per generare variabili normali multivariate
+if(!require(MASS)) install.packages("MASS")
+library(MASS)
+library(parallel)
+
+
+# Parametri simulazione
+nsim <- 500    
+nobs <- 300       
+b1 <- 1    
+b2 <- -2  
+
+set.seed(111)
+
+#----------------------------SEQUENZIALE:
+# Funzione per eseguire tutta la simulazione(sequenziale)
+simulate <- function(sigma) {
+  results1 <- numeric(nsim)
+  results2 <- numeric(nsim)
+  
+  for(i in 1:nsim) {
+    X <- mvrnorm(nobs, mu = c(0,0), Sigma = sigma)
+    x1 <- X[,1]; x2 <- X[,2]
+    
+    y <- b1 * x1 + b2 * x2 + rnorm(nobs, 0, 1)
+    
+    results1[i] <- coef(lm(y ~ x1))["x1"]      # Modello con variabile x2 omessa
+    results2[i] <- coef(lm(y ~ x1 + x2))["x1"] 
+  }
+  return(data.frame(Completo = results2, Ridotto = results1))
+}
+
+# Si eseguono i due scenari
+
+sigma1 <- matrix(c(1, 0.5, 0.5, 1), 2, 2)
+sigma2 <- matrix(c(1, 0, 0, 1), 2, 2)
+
+# Si misura il tempo sequenziale
+tempo_seq <-system.time({
+  risultati1 <- simulate(sigma1)
+  risultati2 <- simulate(sigma2)
+})
+
+#print(tempo_seq)
+
+
+
+
+#---------------------------------PARALLELO:
+
+# Funzione per UNA SOLA iterazione(parallelizzazione)
+one_sim <- function(i, sigma) {
+  X <- mvrnorm(nobs, mu = c(0,0), Sigma = sigma)
+  x1 <- X[,1]; x2 <- X[,2]
+  
+  y <- b1 * x1 + b2 * x2 + rnorm(nobs, 0, 1)
+  
+  Ridotto  <- coef(lm(y ~ x1))["x1"]
+  Completo <- coef(lm(y ~ x1 + x2))["x1"]
+  
+  return(data.frame(Completo = Completo, Ridotto = Ridotto))
+}
+
+cl <- makeCluster(detectCores() - 1)
+clusterExport(cl, c("nobs", "b1", "b2"))
+# Forza ogni nodo a caricare il pacchetto MASS
+clusterEvalQ(cl, library(MASS))
+
+# Si misura il tempo parallelo
+tempo_par <-system.time({
+  risultati1 <- do.call(rbind, parLapply(cl, 1:nsim, one_sim, sigma = sigma1))
+  risultati2 <- do.call(rbind, parLapply(cl, 1:nsim, one_sim, sigma = sigma2))
+})
+
+
+stopCluster(cl)
+
+#print(tempo_par)
+
+```
+
+## Descrizione del problema
+
+**Il vero modello (DGP):**
+
+$$y_i = \beta_0 + \beta_1 x_{1i} + \beta_2 x_{2i} + \varepsilon_i, \quad \varepsilon_i \sim N(0,1)$$
+
+Se ometti $x_2$ e stimi solo $y \sim x_1$, la stima di $\beta_1$ è **distorta**:
+
+$$\hat{\beta}_{1, \text{ridotto}} = \beta_1 + \beta_2 \cdot \frac{Cov(x_1, x_2)}{Var(x_1)}$$
+
+**Il bias è zero solo se:**
+
+- $Cov(x_1, x_2) = 0$ &nbsp;&nbsp;→&nbsp;&nbsp; le variabili sono indipendenti, **oppure**
+- $\beta_2 = 0$ &nbsp;&nbsp;→&nbsp;&nbsp; la variabile omessa **non ha effetto** su $y$
+
+<div style="text-align: right; font-size: 0.7em; font-style: italic;">
+"Can't get the right answer if we ask the wrong question."
+</div>
+
+
+## Design della Simulazione Monte Carlo
+
+```{r tabella, results='asis'}
+# Fatto con AI
+cat('
+<style>
+.compact-table { width:100%; font-size:0.68em; border-collapse:collapse; margin-bottom:3px; }
+.compact-table th { background:#1a7a6e; color:white; padding:2px 8px; text-align:center; }
+.compact-table td { padding:2px 8px; border-bottom:1px solid #ddd; text-align:center; line-height:1.3; }
+.section-title { font-size:0.80em; font-weight:bold; margin: 3px 0 1px 0; }
+.iter-list { font-size:0.75em; margin:2px 0; padding-left:1.2em; line-height:1.3; }
+</style>
+
+<table class="compact-table">
+<tr>
+  <th>Parametro</th>
+  <th>Valori</th>
+</tr>
+<tr><td>β₁ / β₂</td><td>1 / −2</td></tr>
+<tr><td>n obs / n sim</td><td>300 / 500</td></tr>
+<tr><td>Scen. 1: ρ<sub>x<sub>1</sub>x<sub>2</sub></sub> = 0.5</td><td>Bias = β₂ · 0.5</td></tr>
+<tr><td>Scen. 2: ρ<sub>x<sub>1</sub>x<sub>2</sub></sub> = 0</td><td>Bias = 0</td></tr>
+</table>
+')
+```
+
+```{r tempi, results='asis'}
+cat(sprintf('
+<p class="section-title">Confronto tempi di esecuzione (500 sim × 2 scenari):</p>
+<table class="compact-table">
+<tr><th>Metodo</th><th>Tempo</th><th>Note</th></tr>
+<tr><td>Sequenziale</td><td>%.2f s</td><td>1 core, iterazioni una alla volta</td></tr>
+<tr><td>Parallelo</td><td>%.2f s</td><td>%d core, iterazioni simultanee</td></tr>
+<tr><td><b>Speedup</b></td><td><b>&times;%.1f</b></td><td>Guadagno in velocità</td></tr>
+</table>
+
+<p class="section-title">Ad ogni iterazione:</p>
+<ol class="iter-list">
+<li>Genera (x<sub>1</sub>, x<sub>2</sub>) ~ N<sub>2</sub>(<b>0</b>, &Sigma;)</li>
+<li>Costruisce y con il vero DGP</li>
+<li>Stima il <b>modello ridotto</b> (y ~ x<sub>1</sub>) e salva &beta;&#770;<sub>1</sub></li>
+<li>Stima il <b>modello completo</b> (y ~ x<sub>1</sub> + x<sub>2</sub>) e salva &beta;&#770;<sub>1</sub></li>
+</ol>
+', tempo_seq["elapsed"], tempo_par["elapsed"],
+   detectCores() - 1,
+   tempo_seq["elapsed"] / tempo_par["elapsed"]))
+# Fine AI
+```
+
+
+## Risultati e Conclusioni
+
+```{r grafici, fig.width=8.5, fig.height=4.5}
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+
+
+
+# --- SCENARIO 1 (CORRELAZIONE 0.5) ---  Grafici fatti con IA
+
+d <- density(risultati1$Completo)
+
+hist(risultati1$Completo, 
+     probability = TRUE, 
+     col = "skyblue2", 
+     main = "Scen. 1: Modello Completo", 
+     xlab = expression(hat(beta)[1]), 
+     xlim = c(-0.5, 6),
+     ylim = c(0, max(d$y)*1.1),
+     border = "white")
+lines(d, col = "#990F3D", lwd = 2)
+abline(v = b1, col = "black", lty = 2)
+legend("topright",
+       legend = as.expression(c(
+         bquote(E(hat(beta)[1]) == .(round(mean(risultati1$Completo), 2))),
+         bquote(hat(sigma) == .(round(sd(risultati1$Completo), 3)))
+       )),
+       bty = "n", cex = 0.9)
+
+
+d <- density(risultati1$Ridotto)
+
+hist(risultati1$Ridotto, 
+     probability = TRUE, 
+     col = "skyblue2", 
+     main = "Scen. 1: Modello Ridotto", 
+     xlab = expression(hat(beta)[1]), 
+     xlim = c(-0.5, 6),
+     ylim = c(0, max(d$y)*1.1),
+     border = "white")
+lines(d, col = "#990F3D", lwd = 2)
+abline(v = b1, col = "black", lty = 2)
+legend("topright",
+       legend = as.expression(c(
+         bquote(E(hat(beta)[1]) == .(round(mean(risultati1$Ridotto), 2))),
+         bquote(hat(sigma) == .(round(sd(risultati1$Ridotto), 3)))
+       )),
+       bty = "n", cex = 0.9)
+
+# --- SCENARIO 2 (CORRELAZIONE 0) ---
+
+d <- density(risultati2$Completo)
+
+hist(risultati2$Completo, 
+     probability = TRUE, 
+     col = "skyblue2", 
+     main = "Scen. 2: Modello Completo", 
+     xlab = expression(hat(beta)[1]), 
+     xlim = c(-0.5, 6), 
+     ylim = c(0, max(d$y)*1.1),
+     border = "white")
+lines(d, col = "#990F3D", lwd = 2)
+abline(v = b1, col = "black", lty = 2)
+legend("topright",
+       legend = as.expression(c(
+         bquote(E(hat(beta)[1]) == .(round(mean(risultati2$Completo), 2))),
+         bquote(hat(sigma) == .(round(sd(risultati2$Completo), 3)))
+       )),
+       bty = "n", cex = 0.9)
+
+
+d <- density(risultati2$Ridotto)
+
+hist(risultati2$Ridotto, 
+     probability = TRUE, 
+     col = "skyblue2", 
+     main = "Scen. 2: Modello Ridotto", 
+     xlab = expression(hat(beta)[1]), 
+     xlim = c(-0.5, 6), 
+     ylim = c(0, max(d$y)*1.1),
+     border = "white")
+lines(d, col = "#990F3D", lwd = 2)
+abline(v = b1, col = "black", lty = 2)
+legend("topright",
+       legend = as.expression(c(
+         bquote(E(hat(beta)[1]) == .(round(mean(risultati2$Ridotto), 2))),
+         bquote(hat(sigma) == .(round(sd(risultati2$Ridotto), 3)))
+       )),
+       bty = "n", cex = 0.9)
+# Fine IA
+
+```
+
+> La linea tratteggiata indica il **vero valore** $\beta_1 = 1$. Solo nel Scenario 1 il modello ridotto è sistematicamente spostato.
+
+
+## Riferimenti
+
+**Riferimenti di elaborazione**
+
+- Anna Gottard(2026) - *Lab R: Monte Carlo Simulations* , slide del corso di Statistical Learning, UniFi
+
+**Materiale consultato online**
+
+- Eduardo Rossi -  *Distorsione da Variabili Omesse nella Regressione Lineare Multipla*, slide del corso di Economics, UniPV. Disponibile su: [collegesidekick](https://www.collegesidekick.com/study-docs/18980501)
+
+- Paolo Mattana - *Distorsioni da variabile omessa*, materiale dittatico online. Disponibile su: [performancetrading](https://www.performancetrading.it/Documents/PmEconometria/PmEn_Distorsioni_Variabile.htm)
+
+**Uso di inteligenza artificiale**
+
+- Claude(Anthropic) - supporto nel debug del codice R Markdown e nella creazione di grafici/tabelle
